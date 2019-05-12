@@ -1,0 +1,289 @@
+---
+title: "5291 final project"
+author: "Xiaoyun Qin"
+date: 
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library(data.table)
+library(nnet)
+library(PerformanceAnalytics)
+library(corrplot)
+library(readxl)
+library(Hmisc)
+library(ggplot2)
+require(caTools)
+library(car)
+library(dplyr) 
+library(caret)
+library(magrittr)
+library(varImp)
+library(glmnet)
+library(pROC)
+library(arm)
+library(tidyverse)  # data manipulation and visualization
+library(modelr)     # provides easy pipeline modeling functions
+library(broom)      # helps to tidy up model outputs
+library(survey)
+```
+
+```{r functions}
+logistic.regression.summary <- function(glm.mod, digits = 4){
+  library(data.table)
+  glm.coefs <- as.data.table(summary(glm.mod)$coefficients, keep.rownames = TRUE)
+  alpha = 0.05
+  z <- qnorm(p = 1-alpha/2, mean = 0, sd = 1)
+  glm.coefs[, Estimate := Estimate]
+  glm.coefs[, Odds.Ratio := exp(Estimate)]
+  glm.coefs[, OR.Lower.95 := exp(Estimate - z * `Std. Error`)]
+  glm.coefs[, OR.Upper.95 := exp(Estimate + z * `Std. Error`)]
+  return(glm.coefs[][,c(1,2,3,6,5,7,8)])
+}
+
+round.numerics <- function(x, digits = 0, nearest = 1){
+  if(is.numeric(x)){
+    return(nearest * round(x = x/nearest, digits = digits))
+  }
+  else{
+    return(x)
+  }
+}
+```
+
+## Load Data
+```{r load data}
+#setwd('/Users/liangkun/Desktop/5291/Project')
+smoking <- read_excel("NHANES Dataset Smoking.xlsx")
+#smoking <- read_excel("./NHANES Dataset Smoking.xlsx")
+smoking <- data.table(smoking)
+```
+## Data cleaning
+
+```{r data cleaning-design baesd}
+dat_design <- smoking
+dat_design[,'HBP':= ifelse(PEPMNK5R > 90,1,HBP)]
+dat_design[,'Case']<-NULL
+dat_design[,'SEQN']<-NULL
+dat_design[,'HAR1']<-NULL
+dat_design[,'HAR3']<-NULL
+dat_design[,'PEPMNK1R']<-NULL
+dat_design[,'PEPMNK5R']<-NULL
+dat_design<-na.omit(dat_design)
+
+dat_design[,'HSSEX']<-lapply(dat_design[,'HSSEX'], factor)
+dat_design[,'DMARACER']<-lapply(dat_design[,'DMARACER'], factor)
+dat_design[,'SMOKE']<-lapply(dat_design[,'SMOKE'], factor)
+dat_design[,'HBP']<-lapply(dat_design[,'HBP'], factor)
+```
+
+```{r data cleaning-model baesd}
+dat_model <- smoking
+dat_model[,'HBP':= ifelse(PEPMNK5R > 90,1,HBP)]
+dat_model[,'Case']<-NULL
+dat_model[,'SDPPSU6']<-NULL
+dat_model[,'SDPSTRA6']<-NULL
+dat_model[,'SEQN']<-NULL
+dat_model[,'HAR1']<-NULL
+dat_model[,'HAR3']<-NULL
+dat_model[,'WTPFHX6']<-NULL
+dat_model[,'PEPMNK1R']<-NULL
+dat_model[,'PEPMNK5R']<-NULL
+dat_model<-na.omit(dat_model)
+dat_model[,'HSSEX']<-lapply(dat_model[,'HSSEX'], factor)
+dat_model[,'DMARACER']<-lapply(dat_model[,'DMARACER'], factor)
+dat_model[,'SMOKE']<-lapply(dat_model[,'SMOKE'], factor)
+dat_model[,'HBP']<-lapply(dat_model[,'HBP'], factor)
+```
+
+## EDA
+
+### Age
+
+```{r age}
+smoking_eda <- data.table(dat_model)
+age_cut <- c(30,40,50,60,70)
+smoking_eda[,"Age.group" := cut2(x = HSAGEIR, cuts = age_cut)]
+#age_count <- data.table(smoking_eda)[,.N,by = sort(Age.group)]
+age_count <- data.table(smoking_eda)[,.N,by = Age.group]
+names(age_count) <- c("Age Group","Counts")
+ggplot(data = smoking_eda[,.N,by = c("Age.group","HBP")],aes(x = Age.group, y = N,fill= HBP)) +
+  geom_bar(stat="identity",position="dodge")+
+  labs(x = "Age Group", y = "Number of people" ,colour = "High Blood Pressure Type")+
+  ggtitle("Relationship bewteen Age and High Blood Pressure")
+
+```
+
+```{r age_hbp}
+age <- scale(smoking$HSAGEIR)
+y_age <- exp(age)/(1+exp(age))
+ggplot(data.frame(x = age, y = y_age), aes(x, y)) +
+  geom_line() + 
+  ylab(expression(paste(logit^-1,"(x)"))) 
+# the relationship between age and HBP are not linear in logit
+# add third order
+age <- age+age^3
+y_age <- exp(age)/(1+exp(age))
+ggplot(data.frame(x = age, y = y_age), aes(x, y)) +
+  geom_line() + 
+  ylab(expression(paste(logit^-1,"(x)"))) 
+```
+
+
+### sex
+
+
+```{r sex}
+sex_count <- smoking_eda[,.N/nrow(smoking_eda)*100,by = HSSEX]
+sex <- c("Female","Male")
+pie(sex_count$V1,labels = paste(sex," ",round(unlist(sex_count$V1),2),"%", sep="")
+    , main="Percentage of Gender")
+ggplot(data = smoking_eda[,.N,by = c("HSSEX","HBP")],aes(x = HSSEX, y = N,fill= HBP)) +
+  geom_bar(stat="identity",position="dodge")+
+  labs(x = "Gender", y = "Number of people" ,colour = "High Blood Pressure Type")+
+  ggtitle("Relationship bewteen Gender and High Blood Pressure")
+```
+
+
+
+### Race
+
+```{r DMARACER}
+race_count <- smoking_eda[,.N/nrow(smoking_eda)*100,by = DMARACER]
+race <- c("White","Black","Other")
+pie(race_count$V1,labels = paste(race," ",round(unlist(race_count$V1),2),"%", sep="")
+    , main="Percentage of Race",col=topo.colors(length(race)))
+ggplot(data = smoking_eda[,.N ,by = c("DMARACER","HBP")],aes(x = DMARACER, y = N,fill= HBP)) +
+  geom_bar(stat="identity",position="dodge")+
+  labs(x = "Race", y = "Number of people" ,colour = "HBP")+
+  ggtitle("Relationship bewteen Race and High Blood Pressure")
+```
+
+### Weight
+
+```{r BMPWTLBS}
+weight <- scale(smoking$BMPWTLBS)
+y_weight <- exp(weight)/(1+exp(weight))
+
+ggplot(data.frame(x = weight, y = y_weight), aes(x, y)) +
+  geom_line() + 
+  ylab(expression(paste(logit^-1,"(x)"))) 
+# log transformation
+weight <- scale(log(smoking$BMPWTLBS))
+y_weight <- exp(weight)/(1+exp(weight))
+
+ggplot(data.frame(x = weight, y = y_weight), aes(x, y)) +
+  geom_line() + 
+  ylab(expression(paste(logit^-1,"(x)"))) 
+```
+
+### Height
+
+```{r BMPHTIN}
+height <- scale(smoking_eda$BMPHTIN)
+y_height <- exp(height)/(1+exp(height))
+
+ggplot(data.frame(x = height, y = y_height), aes(x, y)) +
+  geom_line() + 
+  ylab(expression(paste(logit^-1,"(x)"))) 
+```
+### TCP
+```{r TCP}
+tcp <- scale(smoking_eda$TCP)
+y_tcp <- exp(tcp)/(1+exp(tcp))
+
+ggplot(data.frame(x = tcp, y = y_tcp), aes(x, y)) +
+  geom_line() + 
+  ylab(expression(paste(logit^-1,"(x)"))) 
+# log transformation
+tcp <- scale(log(smoking_eda$TCP))
+y_tcp <- exp(tcp)/(1+exp(tcp))
+
+ggplot(data.frame(x = tcp, y = y_tcp), aes(x, y)) +
+  geom_line() + 
+  ylab(expression(paste(logit^-1,"(x)"))) 
+```
+
+### SMOKE 
+```{r SMOKE}
+smoke_count <- smoking_eda[,.N/nrow(smoking_eda)*100,by = SMOKE]
+pie(smoke_count$V1,labels = paste(smoke_count$SMOKE," ",round(unlist(smoke_count$V1),2),"%", sep="")
+    , main="Percentage of Race",col=topo.colors(nrow(smoke_count)))
+ggplot(data = smoking_eda[,.N ,by = c("SMOKE","HBP")],aes(x = SMOKE, y = N,fill= HBP)) +
+  geom_bar(stat="identity",position="dodge")+
+  labs(x = "Smoking", y = "Number of people" ,colour = "HBP")+
+  ggtitle("Relationship bewteen Smoking and High Blood Pressure")
+```
+
+# Model Based
+
+```{r}
+dat <- dat_model
+dat[,BMPHTIN:=scale(BMPHTIN)]
+dat[,BMPWTLBS:=scale(log(BMPWTLBS))]
+dat[,HSAGEIR:=scale(HSAGEIR)+scale(HSAGEIR)^3]
+dat[,TCP:=scale(log(TCP))]
+```
+
+## full model 
+```{r}
+fullmod=glm(HBP ~.,data=dat,family=binomial(link="logit"))
+logistic.regression.summary(fullmod)[, lapply(X = .SD
+                                        , FUN = "round.numerics"
+                                        , digits = 4)]
+```
+```{r}
+# remove smoke
+reducemod=glm(HBP ~HSAGEIR+DMARACER+BMPWTLBS+BMPHTIN+HSSEX+TCP,data=dat,family=binomial(link="logit"))
+anova(reducemod,fullmod,test = "Chisq")
+```
+
+```{r }
+# Wald test
+Anova(fullmod,type = "III",test = "Wald")
+```
+# design Based
+
+```{r}
+dat <- dat_design
+dat[,BMPHTIN:=scale(BMPHTIN)]
+dat[,BMPWTLBS:=scale(log(BMPWTLBS))]
+dat[,HSAGEIR:=scale(HSAGEIR)+scale(HSAGEIR^3)]
+dat[,TCP:=scale(log(TCP))]
+
+mydesign <- svydesign(id = ~SDPPSU6,data = dat,weight = ~WTPFHX6,strata = ~SDPSTRA6 ,nest = TRUE)
+```
+
+## full model 
+```{r }
+fullmod=svyglm(HBP~HSAGEIR+DMARACER+BMPWTLBS+BMPHTIN+HSSEX+TCP+SMOKE
+            ,design=mydesign,family=binomial(link="logit"))
+logistic.regression.summary(fullmod)[, lapply(X = .SD
+                                        , FUN = "round.numerics"
+                                        , digits = 4)]
+
+Anova(fullmod, test="Chisq")
+```
+## reduced model - remove smoke
+```{r }
+reducedmod=svyglm(HBP~HSAGEIR+DMARACER+BMPWTLBS+BMPHTIN+HSSEX+TCP
+            ,design=mydesign,family=binomial(link="logit"))
+logistic.regression.summary(reducedmod)[, lapply(X = .SD
+                                        , FUN = "round.numerics"
+                                        , digits = 4)]
+
+```
+## Accuracy
+```{r}
+pred<-predict(reducedmod,dat,type='response')
+predicted.classes <- ifelse(pred > 0.5, "1", "0")
+mean(predicted.classes ==dat$HBP)
+```
+
