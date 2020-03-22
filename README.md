@@ -1,3 +1,10 @@
+Analysis of High blood pressure with traditional statistic method
+
+
+
+
+
+
 High blood pressure is prevalent no matter in developing or developed country. 
 
 It is a long-term medical condition in which the blood pressure in the arteries is persistently elevated
